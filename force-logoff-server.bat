@@ -46,27 +46,31 @@ echo [1/6] Storing temporary credentials for %SERVER% ...
 cmdkey /add:%SERVER% /user:%RUSER% /pass:"%RPASS%" >nul 2>&1
 echo       Done.
 
-REM --- 2. Force logoff using PowerShell (most reliable method) ---
+REM --- 2. Force logoff using PowerShell Remoting -----------------
 echo.
 echo [2/6] Force logging off %RUSER% on %SERVER% via PowerShell...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$pw = ConvertTo-SecureString '%RPASS%' -AsPlainText -Force;" ^
   "$cred = New-Object System.Management.Automation.PSCredential('%SERVER%\%RUSER%', $pw);" ^
   "try {" ^
-  "  $session = Invoke-Command -ComputerName %SERVER% -Credential $cred -ScriptBlock {" ^
-  "    $s = quser 2>&1 | Where-Object { $_ -match '%RUSER%' };" ^
-  "    if ($s) {" ^
-  "      $id = ($s -split '\s+')[($s -match 'Disc' ? 2 : 3)];" ^  
-  "      logoff $id /v;" ^
-  "      Write-Output \"Logged off session ID: $id\"" ^
+  "  $result = Invoke-Command -ComputerName %SERVER% -Credential $cred -ScriptBlock {" ^
+  "    $lines = quser 2>&1 | Where-Object { $_ -match '%RUSER%' };" ^
+  "    if ($lines) {" ^
+  "      foreach ($line in $lines) {" ^
+  "        $parts = $line.Trim() -split '\s+';" ^
+  "        $idx = 2;" ^
+  "        if ($parts[1] -match '^\d+$') { $idx = 1 } elseif ($parts[2] -match '^\d+$') { $idx = 2 } elseif ($parts[3] -match '^\d+$') { $idx = 3 };" ^
+  "        $id = $parts[$idx];" ^
+  "        logoff $id /v 2>&1;" ^
+  "        Write-Output ('Logged off session ID: ' + $id)" ^
+  "      }" ^
   "    } else {" ^
   "      Write-Output 'NO_SESSION_FOUND'" ^
   "    }" ^
   "  } -ErrorAction Stop;" ^
-  "  Write-Host \"  Result: $session\"" ^
+  "  Write-Host ('  Result: ' + $result)" ^
   "} catch {" ^
-  "  Write-Host \"  PowerShell remoting failed: $_\";" ^
-  "  Write-Host '  Trying alternative method...';" ^
+  "  Write-Host ('  PowerShell remoting failed: ' + $_.Exception.Message);" ^
   "  exit 1" ^
   "}"
 
