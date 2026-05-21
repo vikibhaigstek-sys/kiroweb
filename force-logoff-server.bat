@@ -15,9 +15,10 @@ REM
 REM  Run as: Administrator (right-click -> Run as administrator)
 REM ===============================================================
 
-REM ---- Edit these two lines if you ever change the names --------
+REM ---- Edit these lines if you ever change the names/password ---
 set "SERVER=SERVER"
 set "RUSER=user1"
+set "RPASS=Ichalkaranji@416115!@#$%%"
 REM ---------------------------------------------------------------
 
 title Force logoff %RUSER% on %SERVER%
@@ -39,30 +40,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- 1. Ask for password (hidden input via PowerShell) ---------
-echo Enter the password for %SERVER%\%RUSER% (input is hidden):
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command ^
-   "$p=Read-Host -AsSecureString; [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($p))"`) do set "RPASS=%%P"
-
-if not defined RPASS (
-    echo [ERROR] No password entered. Aborting.
-    pause
-    exit /b 1
-)
-
-REM --- 2. Authenticate to SERVER ---------------------------------
+REM --- 1. Authenticate to SERVER ---------------------------------
 echo.
 echo [1/5] Connecting to \\%SERVER%\IPC$ ...
 net use \\%SERVER%\IPC$ /user:%SERVER%\%RUSER% "!RPASS!" >nul 2>&1
 if errorlevel 1 (
     echo       FAILED. Check server name, network, and credentials.
-    set "RPASS="
     pause
     exit /b 1
 )
 echo       Connected.
 
-REM --- 3. Find session ID of %RUSER% on %SERVER% -----------------
+REM --- 2. Find session ID of %RUSER% on %SERVER% -----------------
 echo.
 echo [2/5] Looking up session ID for %RUSER% on %SERVER% ...
 set "SID="
@@ -92,7 +81,7 @@ if not defined SID (
 )
 echo       Session ID = !SID!
 
-REM --- 4. Force the logoff ---------------------------------------
+REM --- 3. Force the logoff ---------------------------------------
 echo.
 echo [3/5] Forcing logoff of session !SID! on %SERVER% ...
 logoff !SID! /server:%SERVER% /v
@@ -103,15 +92,12 @@ if errorlevel 1 (
 )
 
 :disconnect
-REM --- 5. Drop the SMB session to SERVER -------------------------
+REM --- 4. Drop the SMB session to SERVER -------------------------
 echo.
 echo [4/5] Disconnecting \\%SERVER%\IPC$ ...
 net use \\%SERVER%\IPC$ /delete /y >nul 2>&1
 
-REM Wipe password from memory as soon as we no longer need it
-set "RPASS="
-
-REM --- 6. Remove saved creds for SERVER from Credential Manager --
+REM --- 5. Remove saved creds for SERVER from Credential Manager --
 echo.
 echo [5/5] Removing saved credentials matching "%SERVER%" ...
 set "REMOVED=0"
@@ -130,7 +116,7 @@ for /f "tokens=1* delims=:" %%a in ('cmdkey /list ^| findstr /i "Target:"') do (
 )
 if "!REMOVED!"=="0" echo       No saved credentials referenced %SERVER%.
 
-REM --- 7. Restart Workstation service (kills any cached sessions)-
+REM --- 6. Restart Workstation service (kills any cached sessions)-
 echo.
 echo Restarting Workstation service ^(LanmanWorkstation^) ...
 net stop  lanmanworkstation /y
