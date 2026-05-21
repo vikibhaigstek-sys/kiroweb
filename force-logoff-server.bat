@@ -187,6 +187,9 @@ echo   - Workstation service restarted (LAN cache flushed)
 echo   - No one can access %SERVER% from this PC via LAN now
 echo ============================================================
 echo.
-pause
+
+REM --- Show popup message ----------------------------------------
+mshta "javascript:var sh=new ActiveXObject('WScript.Shell');sh.Popup('Task Completed Successfully. Please connect Remote Again.',0,'Message',64);close();"
+
 endlocal
 exit /b 0
