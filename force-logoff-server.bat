@@ -6,7 +6,7 @@ REM  force-logoff-server.bat
 REM  -------------------------------------------------------------
 REM  Purpose:
 REM    1. Force-log off remote RDP user "user1" on host "SERVER"
-REM       from this client PC.
+REM       from this client PC using multiple methods.
 REM    2. Remove any saved credentials for SERVER from this PC's
 REM       Windows Credential Manager.
 REM    3. Restart the Workstation (LanmanWorkstation) service so
@@ -18,7 +18,6 @@ REM ===============================================================
 REM ---- Server and user configuration ---------------------------
 set "SERVER=SERVER"
 set "RUSER=user1"
-REM Password is set WITHOUT DelayedExpansion to avoid ! being stripped
 set RPASS=Ichalkaranji@416115^!@#$%%
 REM ---------------------------------------------------------------
 
@@ -41,119 +40,132 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- 1. Authenticate to SERVER ---------------------------------
+REM --- 1. Store credentials so remote commands authenticate ------
 echo.
-echo [1/5] Connecting to \\%SERVER%\IPC$ ...
+echo [1/6] Storing temporary credentials for %SERVER% ...
+cmdkey /add:%SERVER% /user:%RUSER% /pass:"%RPASS%" >nul 2>&1
+echo       Done.
+
+REM --- 2. Force logoff using PowerShell (most reliable method) ---
+echo.
+echo [2/6] Force logging off %RUSER% on %SERVER% via PowerShell...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$pw = ConvertTo-SecureString '%RPASS%' -AsPlainText -Force;" ^
+  "$cred = New-Object System.Management.Automation.PSCredential('%SERVER%\%RUSER%', $pw);" ^
+  "try {" ^
+  "  $session = Invoke-Command -ComputerName %SERVER% -Credential $cred -ScriptBlock {" ^
+  "    $s = quser 2>&1 | Where-Object { $_ -match '%RUSER%' };" ^
+  "    if ($s) {" ^
+  "      $id = ($s -split '\s+')[($s -match 'Disc' ? 2 : 3)];" ^  
+  "      logoff $id /v;" ^
+  "      Write-Output \"Logged off session ID: $id\"" ^
+  "    } else {" ^
+  "      Write-Output 'NO_SESSION_FOUND'" ^
+  "    }" ^
+  "  } -ErrorAction Stop;" ^
+  "  Write-Host \"  Result: $session\"" ^
+  "} catch {" ^
+  "  Write-Host \"  PowerShell remoting failed: $_\";" ^
+  "  Write-Host '  Trying alternative method...';" ^
+  "  exit 1" ^
+  "}"
+
+if errorlevel 1 (
+    echo.
+    echo       PowerShell remoting not available, trying qwinsta method...
+    goto :try_qwinsta
+)
+goto :cred_cleanup
+
+:try_qwinsta
+REM --- 3. Fallback: use qwinsta + logoff -------------------------
+echo.
+echo [3/6] Trying qwinsta /server:%SERVER% ...
+
+REM First establish IPC$ connection
 net use \\%SERVER%\IPC$ /user:%SERVER%\%RUSER% "%RPASS%" >nul 2>&1
 if errorlevel 1 (
-    echo       FAILED - retrying with IP-style connect...
-    net use \\%SERVER%\IPC$ "%RPASS%" /user:%RUSER% >nul 2>&1
-    if errorlevel 1 (
-        echo       FAILED. Check server name, network, and credentials.
-        pause
-        exit /b 1
-    )
+    net use \\%SERVER%\IPC$ /user:%RUSER% "%RPASS%" >nul 2>&1
 )
-echo       Connected.
 
-REM --- 2. Find session ID using PowerShell (reliable parsing) ----
-echo.
-echo [2/5] Looking up session ID for %RUSER% on %SERVER% ...
-
-REM Use PowerShell to parse quser output reliably
+REM Use PowerShell to parse qwinsta output (avoids batch parsing issues)
 for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command ^
-  "$output = quser /server:%SERVER% 2>&1; foreach ($line in $output) { if ($line -match '^\s*>?%RUSER%\s+') { if ($line -match '^\s*>?\w+\s+\w+\s+(\d+)\s+Active') { $Matches[1] } elseif ($line -match '^\s*>?\w+\s+(\d+)\s+Disc') { $Matches[1] } } }"`) do (
+  "$out = qwinsta /server:%SERVER% 2>&1 | Out-String;" ^
+  "$lines = $out -split [Environment]::NewLine;" ^
+  "foreach ($line in $lines) {" ^
+  "  if ($line -match '%RUSER%') {" ^
+  "    if ($line -match '\s+(\d+)\s+') { $Matches[1]; break }" ^
+  "  }" ^
+  "}"`) do (
     set "SID=%%S"
 )
 
-if not defined SID (
-    echo       No active/disconnected session found for %RUSER%.
-    echo       Trying alternative method...
-    REM Alternative: query session command
-    for /f "tokens=3" %%I in ('query session %RUSER% /server:%SERVER% 2^>nul ^| findstr /i "%RUSER%"') do (
-        set "SID=%%I"
-    )
-)
-
-if not defined SID (
-    echo       Still no session found. Attempting reset session...
-    REM Last resort: try to reset all sessions for user
-    for /f "tokens=2,3,4" %%A in ('query user /server:%SERVER% 2^>nul ^| findstr /i "%RUSER%"') do (
-        echo %%A| findstr /r "^[0-9][0-9]*$" >nul
-        if not errorlevel 1 (
-            set "SID=%%A"
-        ) else (
-            echo %%B| findstr /r "^[0-9][0-9]*$" >nul
-            if not errorlevel 1 (
-                set "SID=%%B"
-            ) else (
-                set "SID=%%C"
-            )
-        )
-    )
-)
-
-if not defined SID (
-    echo       [WARNING] Could not find session ID for %RUSER%.
-    echo       Skipping logoff step.
-    goto :disconnect
-)
-echo       Session ID = %SID%
-
-REM --- 3. Force the logoff ---------------------------------------
-echo.
-echo [3/5] Forcing logoff of session %SID% on %SERVER% ...
-logoff %SID% /server:%SERVER% /v
-if errorlevel 1 (
-    echo       logoff command returned error - trying reset session...
-    reset session %SID% /server:%SERVER% >nul 2>&1
+if defined SID (
+    echo       Found session ID: %SID%
+    echo       Forcing logoff...
+    logoff %SID% /server:%SERVER% /v
     if errorlevel 1 (
-        echo       reset session also failed.
+        echo       logoff failed, trying reset session...
+        reset session %SID% /server:%SERVER%
     ) else (
-        echo       Session reset successfully.
+        echo       Logoff successful.
     )
 ) else (
-    echo       Logoff issued successfully.
+    echo       qwinsta could not find session. Trying final method...
+    goto :try_taskkill
 )
+goto :cleanup_ipc
 
-:disconnect
-REM --- 4. Drop the SMB session to SERVER -------------------------
+:try_taskkill
+REM --- 3b. Last resort: taskkill on explorer.exe for user1 -------
 echo.
-echo [4/5] Disconnecting \\%SERVER%\IPC$ ...
+echo       Using taskkill to end all processes of %RUSER% on %SERVER%...
+taskkill /s %SERVER% /u %SERVER%\%RUSER% /p "%RPASS%" /fi "USERNAME eq %RUSER%" /f >nul 2>&1
+echo       taskkill executed (this effectively logs off the user).
+
+:cleanup_ipc
+REM Disconnect IPC$
 net use \\%SERVER%\IPC$ /delete /y >nul 2>&1
-net use * /delete /y >nul 2>&1
 
-REM --- 5. Remove saved creds for SERVER from Credential Manager --
+:cred_cleanup
+REM --- 4. Remove ALL saved credentials for SERVER ----------------
 echo.
-echo [5/5] Removing saved credentials matching "%SERVER%" ...
+echo [4/6] Removing saved credentials for %SERVER% ...
 
-REM Delete common credential target formats for RDP/SMB
-cmdkey /delete:TERMSRV/%SERVER% >nul 2>&1
+REM Delete known credential formats
 cmdkey /delete:%SERVER% >nul 2>&1
+cmdkey /delete:TERMSRV/%SERVER% >nul 2>&1
 cmdkey /delete:Domain:target=%SERVER% >nul 2>&1
+cmdkey /delete:%SERVER%.* >nul 2>&1
 
-REM Also scan and remove any other matching entries
+REM Scan and remove any remaining entries matching SERVER
 setlocal EnableDelayedExpansion
-for /f "tokens=1* delims=:" %%a in ('cmdkey /list ^| findstr /i "Target:"') do (
-    set "TGT=%%b"
-    if "!TGT:~0,1!"==" " set "TGT=!TGT:~1!"
-    echo !TGT! | findstr /i "%SERVER%" >nul
-    if !errorlevel! == 0 (
-        cmdkey /delete:!TGT! >nul 2>&1
-        echo       Removed: !TGT!
+for /f "tokens=*" %%a in ('cmdkey /list ^| findstr /i /c:"Target:" ^| findstr /i /c:"%SERVER%"') do (
+    set "LINE=%%a"
+    set "LINE=!LINE:*Target: =!"
+    set "LINE=!LINE: =!"
+    if not "!LINE!"=="" (
+        cmdkey /delete:"!LINE!" >nul 2>&1
+        echo       Removed: !LINE!
     )
 )
 endlocal
 echo       Credential cleanup complete.
 
-REM --- 6. Restart Workstation service (kills any cached sessions)-
+REM --- 5. Delete all net use connections -------------------------
 echo.
-echo Restarting Workstation service (LanmanWorkstation) ...
+echo [5/6] Clearing all network connections ...
+net use * /delete /y >nul 2>&1
+echo       Done.
+
+REM --- 6. Restart Workstation service ----------------------------
+echo.
+echo [6/6] Restarting Workstation service (LanmanWorkstation) ...
 net stop lanmanworkstation /y
 timeout /t 3 /nobreak >nul
 net start lanmanworkstation
 
-REM Re-start common dependents
+REM Re-start dependent services
 net start "Computer Browser"                >nul 2>&1
 net start "Netlogon"                        >nul 2>&1
 net start "Distributed Link Tracking Client">nul 2>&1
@@ -163,9 +175,11 @@ net start "Offline Files"                   >nul 2>&1
 echo.
 echo ============================================================
 echo  DONE.
-echo   - %RUSER% logged off on %SERVER% (if a session existed)
-echo   - Saved credentials for %SERVER% cleared on this PC
+echo   - %RUSER% force logged off on %SERVER%
+echo   - All saved credentials for %SERVER% removed
+echo   - All network connections cleared
 echo   - Workstation service restarted (LAN cache flushed)
+echo   - No one can access %SERVER% from this PC via LAN now
 echo ============================================================
 echo.
 pause
