@@ -40,48 +40,102 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- 1. Establish connection to SERVER -------------------------
+REM --- 1. Store credentials and establish connection -------------
 echo.
-echo [1/5] Connecting to \\%SERVER%\IPC$ ...
+echo [1/5] Authenticating to %SERVER% ...
+cmdkey /add:%SERVER% /user:%RUSER% /pass:"%RPASS%" >nul 2>&1
 net use \\%SERVER%\IPC$ /user:%SERVER%\%RUSER% "%RPASS%" >nul 2>&1
 if errorlevel 1 (
     net use \\%SERVER%\IPC$ /user:%RUSER% "%RPASS%" >nul 2>&1
-    if errorlevel 1 (
-        echo       FAILED. Check server name, network, and credentials.
-        pause
-        exit /b 1
-    )
 )
-echo       Connected.
+echo       Credentials stored and connection established.
 
-REM --- 2. Find session ID and force logoff -----------------------
+REM --- 2. Force logoff using multiple approaches -----------------
 echo.
-echo [2/5] Finding session for %RUSER% on %SERVER% and logging off...
+echo [2/5] Force logging off %RUSER% on %SERVER% ...
+echo.
 
-REM Use PowerShell to reliably parse qwinsta output and get session ID
+REM --- Method A: Direct logoff via qwinsta -----------------------
+echo       Method A: Querying sessions with qwinsta...
+set "SID="
 for /f "usebackq delims=" %%S in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$lines = qwinsta /server:%SERVER% 2>&1; foreach ($line in $lines) { if ($line -match '%RUSER%') { if ($line -match '\s+(\d+)\s+') { Write-Output $Matches[1]; break } } }"`) do (
     set "SID=%%S"
 )
 
 if defined SID (
     echo       Found session ID: %SID%
-    echo       Forcing logoff...
     logoff %SID% /server:%SERVER% /v
-    if errorlevel 1 (
-        echo       logoff returned error, trying reset session...
-        reset session %SID% /server:%SERVER%
-    ) else (
-        echo       Logoff successful.
+    if not errorlevel 1 (
+        echo       SUCCESS: Session %SID% logged off.
+        goto :logoff_done
     )
-    goto :cleanup
+    echo       logoff command failed, trying reset...
+    reset session %SID% /server:%SERVER%
+    if not errorlevel 1 (
+        echo       SUCCESS: Session %SID% reset.
+        goto :logoff_done
+    )
 )
 
-echo       qwinsta did not find session. Trying taskkill method...
+echo       Method A did not work. Trying Method B...
 echo.
-taskkill /s %SERVER% /u %SERVER%\%RUSER% /p "%RPASS%" /fi "USERNAME eq %RUSER%" /f >nul 2>&1
-echo       taskkill executed (forces user processes to end).
 
-:cleanup
+REM --- Method B: Use PowerShell with explicit credentials --------
+echo       Method B: PowerShell WMI remote logoff...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$pass = ConvertTo-SecureString -String '%RPASS%' -AsPlainText -Force;" ^
+  "$cred = New-Object System.Management.Automation.PSCredential('%SERVER%\%RUSER%', $pass);" ^
+  "$sessions = Get-WmiObject -Class Win32_Process -ComputerName '%SERVER%' -Credential $cred -Filter \"Name='explorer.exe'\" -ErrorAction SilentlyContinue;" ^
+  "if ($sessions) {" ^
+  "  foreach ($proc in $sessions) {" ^
+  "    $owner = $proc.GetOwner();" ^
+  "    if ($owner.User -eq '%RUSER%') {" ^
+  "      $proc.Terminate() | Out-Null;" ^
+  "      Write-Host '      SUCCESS: Terminated explorer.exe for %RUSER%'" ^
+  "    }" ^
+  "  }" ^
+  "} else {" ^
+  "  Write-Host '      No explorer.exe found, trying Win32_OperatingSystem...';" ^
+  "  $os = Get-WmiObject -Class Win32_OperatingSystem -ComputerName '%SERVER%' -Credential $cred -ErrorAction SilentlyContinue;" ^
+  "  if ($os) {" ^
+  "    $os.Win32Shutdown(4) | Out-Null;" ^
+  "    Write-Host '      Forced logoff signal sent via WMI'" ^
+  "  } else {" ^
+  "    Write-Host '      WMI connection failed';" ^
+  "    exit 1" ^
+  "  }" ^
+  "}"
+
+if not errorlevel 1 goto :logoff_done
+
+echo       Method B did not work. Trying Method C...
+echo.
+
+REM --- Method C: taskkill to kill all user processes remotely -----
+echo       Method C: Killing all processes for %RUSER% via taskkill...
+taskkill /s %SERVER% /u %SERVER%\%RUSER% /p "%RPASS%" /fi "USERNAME eq %RUSER%" /f
+if not errorlevel 1 (
+    echo       SUCCESS: All processes terminated for %RUSER%.
+    goto :logoff_done
+)
+
+REM --- Method D: shutdown command to force logoff ----------------
+echo       Method C did not work. Trying Method D...
+echo.
+echo       Method D: Remote shutdown /l ...
+shutdown /m \\%SERVER% /l /f
+if not errorlevel 1 (
+    echo       SUCCESS: Forced logoff via shutdown command.
+    goto :logoff_done
+)
+
+echo.
+echo       [WARNING] All methods attempted. Check server connectivity.
+
+:logoff_done
+echo.
+echo       Logoff step complete.
+
 REM --- 3. Disconnect from SERVER ---------------------------------
 echo.
 echo [3/5] Disconnecting from %SERVER% ...
