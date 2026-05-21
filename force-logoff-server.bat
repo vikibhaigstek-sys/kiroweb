@@ -18,7 +18,7 @@ REM ===============================================================
 REM ---- Server and user configuration ---------------------------
 set "SERVER=SERVER"
 set "RUSER=user1"
-REM Password is set below WITHOUT DelayedExpansion to avoid ! issues
+REM Password is set WITHOUT DelayedExpansion to avoid ! being stripped
 set RPASS=Ichalkaranji@416115^!@#$%%
 REM ---------------------------------------------------------------
 
@@ -46,76 +46,105 @@ echo.
 echo [1/5] Connecting to \\%SERVER%\IPC$ ...
 net use \\%SERVER%\IPC$ /user:%SERVER%\%RUSER% "%RPASS%" >nul 2>&1
 if errorlevel 1 (
-    echo       FAILED. Check server name, network, and credentials.
-    pause
-    exit /b 1
+    echo       FAILED - retrying with IP-style connect...
+    net use \\%SERVER%\IPC$ "%RPASS%" /user:%RUSER% >nul 2>&1
+    if errorlevel 1 (
+        echo       FAILED. Check server name, network, and credentials.
+        pause
+        exit /b 1
+    )
 )
 echo       Connected.
 
-REM --- Enable DelayedExpansion AFTER password has been set --------
-setlocal EnableDelayedExpansion
-
-REM --- 2. Find session ID of %RUSER% on %SERVER% -----------------
+REM --- 2. Find session ID using PowerShell (reliable parsing) ----
 echo.
 echo [2/5] Looking up session ID for %RUSER% on %SERVER% ...
-set "SID="
 
-for /f "skip=1 tokens=1,2,3,4" %%A in ('quser /server:%SERVER% 2^>nul') do (
-    set "U=%%A"
-    if "!U:~0,1!"==">" set "U=!U:~1!"
-    if /i "!U!"=="%RUSER%" (
-        echo %%B| findstr /r "^[0-9][0-9]*$" >nul
-        if !errorlevel! == 0 (
-            set "SID=%%B"
+REM Use PowerShell to parse quser output reliably
+for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command ^
+  "$output = quser /server:%SERVER% 2>&1; foreach ($line in $output) { if ($line -match '^\s*>?%RUSER%\s+') { if ($line -match '^\s*>?\w+\s+\w+\s+(\d+)\s+Active') { $Matches[1] } elseif ($line -match '^\s*>?\w+\s+(\d+)\s+Disc') { $Matches[1] } } }"`) do (
+    set "SID=%%S"
+)
+
+if not defined SID (
+    echo       No active/disconnected session found for %RUSER%.
+    echo       Trying alternative method...
+    REM Alternative: query session command
+    for /f "tokens=3" %%I in ('query session %RUSER% /server:%SERVER% 2^>nul ^| findstr /i "%RUSER%"') do (
+        set "SID=%%I"
+    )
+)
+
+if not defined SID (
+    echo       Still no session found. Attempting reset session...
+    REM Last resort: try to reset all sessions for user
+    for /f "tokens=2,3,4" %%A in ('query user /server:%SERVER% 2^>nul ^| findstr /i "%RUSER%"') do (
+        echo %%A| findstr /r "^[0-9][0-9]*$" >nul
+        if not errorlevel 1 (
+            set "SID=%%A"
         ) else (
-            set "SID=%%C"
+            echo %%B| findstr /r "^[0-9][0-9]*$" >nul
+            if not errorlevel 1 (
+                set "SID=%%B"
+            ) else (
+                set "SID=%%C"
+            )
         )
     )
 )
 
 if not defined SID (
-    echo       No active session found for %RUSER%. Skipping logoff.
+    echo       [WARNING] Could not find session ID for %RUSER%.
+    echo       Skipping logoff step.
     goto :disconnect
 )
-echo       Session ID = !SID!
+echo       Session ID = %SID%
 
 REM --- 3. Force the logoff ---------------------------------------
 echo.
-echo [3/5] Forcing logoff of session !SID! on %SERVER% ...
-logoff !SID! /server:%SERVER% /v
+echo [3/5] Forcing logoff of session %SID% on %SERVER% ...
+logoff %SID% /server:%SERVER% /v
 if errorlevel 1 (
-    echo       WARNING: logoff returned a non-zero exit code.
+    echo       logoff command returned error - trying reset session...
+    reset session %SID% /server:%SERVER% >nul 2>&1
+    if errorlevel 1 (
+        echo       reset session also failed.
+    ) else (
+        echo       Session reset successfully.
+    )
 ) else (
     echo       Logoff issued successfully.
 )
 
 :disconnect
-endlocal
-
 REM --- 4. Drop the SMB session to SERVER -------------------------
 echo.
 echo [4/5] Disconnecting \\%SERVER%\IPC$ ...
 net use \\%SERVER%\IPC$ /delete /y >nul 2>&1
+net use * /delete /y >nul 2>&1
 
 REM --- 5. Remove saved creds for SERVER from Credential Manager --
 echo.
 echo [5/5] Removing saved credentials matching "%SERVER%" ...
+
+REM Delete common credential target formats for RDP/SMB
+cmdkey /delete:TERMSRV/%SERVER% >nul 2>&1
+cmdkey /delete:%SERVER% >nul 2>&1
+cmdkey /delete:Domain:target=%SERVER% >nul 2>&1
+
+REM Also scan and remove any other matching entries
 setlocal EnableDelayedExpansion
-set "REMOVED=0"
 for /f "tokens=1* delims=:" %%a in ('cmdkey /list ^| findstr /i "Target:"') do (
     set "TGT=%%b"
     if "!TGT:~0,1!"==" " set "TGT=!TGT:~1!"
     echo !TGT! | findstr /i "%SERVER%" >nul
     if !errorlevel! == 0 (
         cmdkey /delete:!TGT! >nul 2>&1
-        if !errorlevel! == 0 (
-            echo       Removed: !TGT!
-            set /a REMOVED+=1
-        )
+        echo       Removed: !TGT!
     )
 )
-if "!REMOVED!"=="0" echo       No saved credentials referenced %SERVER%.
 endlocal
+echo       Credential cleanup complete.
 
 REM --- 6. Restart Workstation service (kills any cached sessions)-
 echo.
