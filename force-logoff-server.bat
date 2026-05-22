@@ -146,27 +146,29 @@ REM --- 4. Remove LAN credentials BUT keep TERMSRV (RDP) ----------
 echo.
 echo [4/5] Removing LAN credentials (keeping RDP) ...
 
-setlocal EnableDelayedExpansion
-set "REMOVED=0"
-for /f "tokens=*" %%a in ('cmdkey /list ^| findstr /i /c:"Target:"') do (
-    set "LINE=%%a"
-    set "TGT=!LINE:*Target: =!"
-    set "TGT=!TGT: =!"
+REM First: explicitly delete all known LAN credential formats
+cmdkey /delete:%SERVER% >nul 2>&1 && echo       REMOVED: %SERVER%
+cmdkey /delete:Domain:target=%SERVER% >nul 2>&1 && echo       REMOVED: Domain:target=%SERVER%
+cmdkey /delete:Domain:interactive=%SERVER%\%RUSER% >nul 2>&1 && echo       REMOVED: Domain:interactive=%SERVER%\%RUSER%
+cmdkey /delete:Domain:interactive=%SERVER%\Administrator >nul 2>&1 && echo       REMOVED: Domain:interactive=%SERVER%\Administrator
+cmdkey /delete:LegacyGeneric:target=%SERVER% >nul 2>&1 && echo       REMOVED: LegacyGeneric:target=%SERVER%
+cmdkey /delete:%SERVER%.* >nul 2>&1 && echo       REMOVED: %SERVER%.*
 
-    echo !TGT! | findstr /i "%SERVER%" >nul
-    if !errorlevel! == 0 (
-        echo !TGT! | findstr /i "TERMSRV" >nul
-        if !errorlevel! == 0 (
-            echo       KEEPING: !TGT! (RDP credential)
-        ) else (
-            cmdkey /delete:"!TGT!" >nul 2>&1
-            echo       REMOVED: !TGT! (LAN credential)
-            set /a REMOVED+=1
-        )
-    )
-)
-if "!REMOVED!"=="0" echo       No LAN credentials found for %SERVER%.
-endlocal
+REM Second: use PowerShell to find and delete any remaining non-TERMSRV creds
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$output = cmdkey /list 2>&1 | Out-String;" ^
+  "$targets = [regex]::Matches($output, 'Target:\s*(.+)');" ^
+  "foreach ($t in $targets) {" ^
+  "  $target = $t.Groups[1].Value.Trim();" ^
+  "  if ($target -match '%SERVER%' -and $target -notmatch 'TERMSRV') {" ^
+  "    $null = cmdkey /delete:$target 2>&1;" ^
+  "    Write-Host ('      REMOVED: ' + $target + ' (LAN credential)')" ^
+  "  } elseif ($target -match 'TERMSRV' -and $target -match '%SERVER%') {" ^
+  "    Write-Host ('      KEEPING: ' + $target + ' (RDP credential)')" ^
+  "  }" ^
+  "}"
+
+echo       Credential cleanup complete.
 
 REM --- 5. Restart Workstation service (flush cached LAN sessions) -
 echo.
