@@ -5,12 +5,8 @@ REM ===============================================================
 REM  force-logoff-server.bat
 REM  -------------------------------------------------------------
 REM  Purpose:
-REM    1. Force-log off remote RDP user "user1" on host "SERVER"
-REM       from this client PC.
-REM    2. Remove any saved credentials for SERVER from this PC's
-REM       Windows Credential Manager.
-REM    3. Restart the Workstation (LanmanWorkstation) service so
-REM       no cached LAN session for SERVER survives.
+REM    Force-log off remote RDP user "user1" on host "SERVER"
+REM    from this client PC.
 REM
 REM  Run as: Administrator (right-click -> Run as administrator)
 REM ===============================================================
@@ -25,7 +21,7 @@ title Force logoff %RUSER% on %SERVER%
 
 echo.
 echo ============================================================
-echo   Force logoff "%RUSER%" on "%SERVER%" + clear local creds
+echo   Force logoff "%RUSER%" on "%SERVER%"
 echo ============================================================
 echo.
 
@@ -42,7 +38,7 @@ if errorlevel 1 (
 
 REM --- 1. Store credentials and establish connection -------------
 echo.
-echo [1/5] Authenticating to %SERVER% ...
+echo [1/3] Authenticating to %SERVER% ...
 cmdkey /add:%SERVER% /user:%RUSER% /pass:"%RPASS%" >nul 2>&1
 net use \\%SERVER%\IPC$ /user:%SERVER%\%RUSER% "%RPASS%" >nul 2>&1
 if errorlevel 1 (
@@ -52,7 +48,7 @@ echo       Credentials stored and connection established.
 
 REM --- 2. Force logoff using multiple approaches -----------------
 echo.
-echo [2/5] Force logging off %RUSER% on %SERVER% ...
+echo [2/3] Force logging off %RUSER% on %SERVER% ...
 echo.
 
 REM --- Method A: Direct logoff via qwinsta -----------------------
@@ -136,55 +132,17 @@ echo       [WARNING] All methods attempted. Check server connectivity.
 echo.
 echo       Logoff step complete.
 
-REM --- 3. Disconnect from SERVER ---------------------------------
+REM --- 3. Disconnect IPC$ session ---------------------------------
 echo.
-echo [3/5] Disconnecting from %SERVER% ...
+echo [3/3] Disconnecting IPC$ from %SERVER% ...
 net use \\%SERVER%\IPC$ /delete /y >nul 2>&1
-net use * /delete /y >nul 2>&1
 echo       Done.
-
-REM --- 4. Remove ALL saved credentials for SERVER ----------------
-echo.
-echo [4/5] Removing saved credentials for %SERVER% ...
-
-cmdkey /delete:%SERVER% >nul 2>&1
-cmdkey /delete:TERMSRV/%SERVER% >nul 2>&1
-cmdkey /delete:Domain:target=%SERVER% >nul 2>&1
-
-setlocal EnableDelayedExpansion
-for /f "tokens=*" %%a in ('cmdkey /list ^| findstr /i /c:"Target:" ^| findstr /i /c:"%SERVER%"') do (
-    set "LINE=%%a"
-    set "LINE=!LINE:*Target: =!"
-    set "LINE=!LINE: =!"
-    if not "!LINE!"=="" (
-        cmdkey /delete:"!LINE!" >nul 2>&1
-        echo       Removed: !LINE!
-    )
-)
-endlocal
-echo       Credential cleanup complete.
-
-REM --- 5. Restart Workstation service ----------------------------
-echo.
-echo [5/5] Restarting Workstation service (LanmanWorkstation) ...
-net stop lanmanworkstation /y
-timeout /t 3 /nobreak >nul
-net start lanmanworkstation
-
-net start "Computer Browser"                >nul 2>&1
-net start "Netlogon"                        >nul 2>&1
-net start "Distributed Link Tracking Client">nul 2>&1
-net start "Background Intelligent Transfer Service" >nul 2>&1
-net start "Offline Files"                   >nul 2>&1
 
 echo.
 echo ============================================================
 echo  DONE.
 echo   - %RUSER% force logged off on %SERVER%
-echo   - All saved credentials for %SERVER% removed
-echo   - All network connections cleared
-echo   - Workstation service restarted (LAN cache flushed)
-echo   - No one can access %SERVER% from this PC via LAN now
+echo   - Credentials kept for future use
 echo ============================================================
 echo.
 
