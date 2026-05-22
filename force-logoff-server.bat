@@ -132,22 +132,67 @@ echo       [WARNING] All methods attempted. Check server connectivity.
 echo.
 echo       Logoff step complete.
 
-REM --- 3. Disconnect IPC$ session ---------------------------------
+REM --- 3. Disconnect all network shares to SERVER -----------------
 echo.
-echo [3/3] Disconnecting IPC$ from %SERVER% ...
+echo [3/5] Disconnecting all network shares to %SERVER% ...
 net use \\%SERVER%\IPC$ /delete /y >nul 2>&1
+net use \\%SERVER%\C$ /delete /y >nul 2>&1
+net use \\%SERVER%\D$ /delete /y >nul 2>&1
+net use \\%SERVER%\E$ /delete /y >nul 2>&1
+net use * /delete /y >nul 2>&1
 echo       Done.
+
+REM --- 4. Remove LAN credentials BUT keep TERMSRV (RDP) ----------
+echo.
+echo [4/5] Removing LAN credentials (keeping RDP) ...
+
+setlocal EnableDelayedExpansion
+set "REMOVED=0"
+for /f "tokens=*" %%a in ('cmdkey /list ^| findstr /i /c:"Target:"') do (
+    set "LINE=%%a"
+    set "TGT=!LINE:*Target: =!"
+    set "TGT=!TGT: =!"
+
+    echo !TGT! | findstr /i "%SERVER%" >nul
+    if !errorlevel! == 0 (
+        echo !TGT! | findstr /i "TERMSRV" >nul
+        if !errorlevel! == 0 (
+            echo       KEEPING: !TGT! (RDP credential)
+        ) else (
+            cmdkey /delete:"!TGT!" >nul 2>&1
+            echo       REMOVED: !TGT! (LAN credential)
+            set /a REMOVED+=1
+        )
+    )
+)
+if "!REMOVED!"=="0" echo       No LAN credentials found for %SERVER%.
+endlocal
+
+REM --- 5. Restart Workstation service (flush cached LAN sessions) -
+echo.
+echo [5/5] Restarting Workstation service (LanmanWorkstation) ...
+net stop lanmanworkstation /y
+timeout /t 3 /nobreak >nul
+net start lanmanworkstation
+
+net start "Computer Browser"                >nul 2>&1
+net start "Netlogon"                        >nul 2>&1
+net start "Distributed Link Tracking Client">nul 2>&1
+net start "Background Intelligent Transfer Service" >nul 2>&1
+net start "Offline Files"                   >nul 2>&1
 
 echo.
 echo ============================================================
 echo  DONE.
 echo   - %RUSER% force logged off on %SERVER%
-echo   - Credentials kept for future use
+echo   - LAN/SMB credentials REMOVED (no LAN access possible)
+echo   - TERMSRV/RDP credentials KEPT (Remote Desktop works)
+echo   - Workstation service restarted (LAN cache flushed)
 echo ============================================================
 echo.
 
 REM --- Show popup message ----------------------------------------
-mshta "javascript:var sh=new ActiveXObject('WScript.Shell');sh.Popup('Task Completed Successfully. Please connect Remote Again.',0,'Message',64);close();"
+mshta "javascript:var sh=new ActiveXObject('WScript.Shell');sh.Popup('Task Completed Successfully. Please connect Remote Again.\n\nLAN access cleared. RDP still works.',0,'Message',64);close();"
 
 endlocal
 exit /b 0
